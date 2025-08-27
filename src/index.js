@@ -48,8 +48,11 @@ app.get('/api/test-db', async (req, res) => {
   }
 });
 
-// TODO: Add authentication routes
-// TODO: Add event routes
+// Routes
+const authRoutes = require('./routes/auth');
+const eventRoutes = require('./routes/events');
+app.use('/api/auth', authRoutes);
+app.use('/api/events', eventRoutes);
 // TODO: Add RSVP routes
 // TODO: Add feedback routes
 // TODO: Add Socket.IO integration
