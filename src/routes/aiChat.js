@@ -52,6 +52,20 @@ router.post('/chat', authenticateToken, async (req, res) => {
       aiReply = completion.choices[0].message.content;
     }
 
+    // Simpan log chat AI jika user login
+    try {
+      const { AiChatLog } = require('../config/database');
+      if (req.user && req.user.id) {
+        await AiChatLog.create({
+          user_id: req.user.id,
+          message: JSON.stringify(history),
+          response: aiReply
+        });
+      }
+    } catch (logErr) {
+      console.error('Failed to log AI chat:', logErr);
+    }
+
     res.json({
       status: 'success',
       ai_reply: aiReply,

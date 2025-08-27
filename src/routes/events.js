@@ -1,3 +1,23 @@
+// GET /api/events/:id/rating - get average rating for event
+const { Feedback } = require('../config/database');
+router.get('/:id/rating', async (req, res) => {
+	try {
+		const eventId = parseInt(req.params.id, 10);
+		if (isNaN(eventId)) return res.status(400).json({ status: 'error', message: 'Invalid event id' });
+		const result = await Feedback.findAll({
+			where: { event_id: eventId },
+			attributes: [
+				[require('sequelize').fn('AVG', require('sequelize').col('rating')), 'avg_rating'],
+				[require('sequelize').fn('COUNT', require('sequelize').col('id')), 'count']
+			]
+		});
+		const avg = result[0]?.get('avg_rating');
+		const count = result[0]?.get('count');
+		res.json({ status: 'success', event_id: eventId, avg_rating: avg ? parseFloat(avg).toFixed(2) : null, count: parseInt(count, 10) });
+	} catch (error) {
+		res.status(500).json({ status: 'error', message: 'Internal server error', error: error.message });
+	}
+});
 const express = require('express');
 const { Op } = require('sequelize');
 const { Event, User, MyEvent, sequelize } = require('../config/database');
