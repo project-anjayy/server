@@ -3,13 +3,19 @@ const cors = require('cors');
 require('dotenv').config();
 
 // Import database
-const db = require('./config/database');
+const db = require('./src/config/database');
+
+// Import routes
+const authRoutes = require('./src/routes/auth');
 
 const app = express();
 
 // Middleware
 app.use(cors());
 app.use(express.json());
+
+// Routes
+app.use('/api/auth', authRoutes);
 
 // Basic route
 app.get('/', (req, res) => {
@@ -48,15 +54,11 @@ app.get('/api/test-db', async (req, res) => {
   }
 });
 
-// TODO: Add authentication routes
-// TODO: Add event routes
-// TODO: Add RSVP routes
-// TODO: Add feedback routes
-// TODO: Add Socket.IO integration
-
-const PORT = process.env.PORT || 3001;
+const PORT = 3001
 
 app.listen(PORT, () => {
   console.log(`🚀 Server is running on port ${PORT}`);
-  console.log(`� API URL: http://localhost:${PORT}`);
+  console.log(`🌐 API URL: http://localhost:${PORT}`);
 });
+
+module.exports = app;
