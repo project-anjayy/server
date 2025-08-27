@@ -82,6 +82,11 @@ module.exports = (sequelize, DataTypes) => {
       defaultValue: 0,
   // Removed min validator due to unexpected false failures; we'll enforce in hooks/routes
     },
+    duration: {
+      type: DataTypes.INTEGER,
+      allowNull: false,
+      comment: 'Durasi event dalam menit'
+    },
     created_by: {
       type: DataTypes.INTEGER,
       allowNull: false,

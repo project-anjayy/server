@@ -28,6 +28,7 @@ app.use(express.urlencoded({extended:true}))
 // Routes
 app.use('/api/auth', authRoutes);
 app.use('/api/events', require('./src/routes/events'));
+app.use('/api/events/recommend', require('./src/routes/aiChat'));
 
 // Basic route
 app.get('/', (req, res) => {
