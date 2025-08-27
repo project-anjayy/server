@@ -1,6 +1,6 @@
 const express = require('express');
 const { Op } = require('sequelize');
-const { Event, User } = require('../config/database');
+const { Event, User, MyEvent, sequelize } = require('../config/database');
 const authenticateToken = require('../middleware/auth');
 
 const router = express.Router();
@@ -97,7 +97,9 @@ router.get('/', async (req, res) => {
 // GET /api/events/:id - event detail
 router.get('/:id', async (req, res) => {
 	try {
-		const event = await Event.findByPk(req.params.id, {
+		const eventId = parseInt(req.params.id, 10);
+		if (isNaN(eventId)) return res.status(400).json({ status: 'error', message: 'Invalid event id' });
+		const event = await Event.findByPk(eventId, {
 			include: [{ model: User, as: 'creator', attributes: ['id', 'name', 'email'] }]
 		});
 		if (!event) return res.status(404).json({ status: 'error', message: 'Event not found' });
@@ -111,7 +113,9 @@ router.get('/:id', async (req, res) => {
 // PUT /api/events/:id - update event (only creator)
 router.put('/:id', authenticateToken, async (req, res) => {
 	try {
-		const event = await Event.findByPk(req.params.id);
+		const eventId = parseInt(req.params.id, 10);
+		if (isNaN(eventId)) return res.status(400).json({ status: 'error', message: 'Invalid event id' });
+		const event = await Event.findByPk(eventId);
 		if (!event) return res.status(404).json({ status: 'error', message: 'Event not found' });
 		if (event.created_by !== req.user.id) {
 			return res.status(403).json({ status: 'error', message: 'Not authorized to update this event' });
@@ -150,7 +154,9 @@ router.put('/:id', authenticateToken, async (req, res) => {
 // DELETE /api/events/:id - delete event (only creator)
 router.delete('/:id', authenticateToken, async (req, res) => {
 	try {
-		const event = await Event.findByPk(req.params.id);
+		const eventId = parseInt(req.params.id, 10);
+		if (isNaN(eventId)) return res.status(400).json({ status: 'error', message: 'Invalid event id' });
+		const event = await Event.findByPk(eventId);
 		if (!event) return res.status(404).json({ status: 'error', message: 'Event not found' });
 		if (event.created_by !== req.user.id) {
 			return res.status(403).json({ status: 'error', message: 'Not authorized to delete this event' });
@@ -160,6 +166,109 @@ router.delete('/:id', authenticateToken, async (req, res) => {
 	} catch (error) {
 		console.error('Delete event error:', error);
 		res.status(500).json({ status: 'error', message: 'Internal server error', error: error.message });
+	}
+});
+
+// POST /api/events/:id/rsvp - join event
+router.post('/:id/rsvp', authenticateToken, async (req, res) => {
+	const t = await sequelize.transaction();
+	try {
+		const eventId = parseInt(req.params.id, 10);
+		if (isNaN(eventId)) {
+			await t.rollback();
+			return res.status(400).json({ status: 'error', message: 'Invalid event id' });
+		}
+		const event = await Event.findByPk(eventId, { transaction: t, lock: t.LOCK.UPDATE });
+		if (!event) {
+			await t.rollback();
+			return res.status(404).json({ status: 'error', message: 'Event not found' });
+		}
+
+		// Prevent creator from joining if desired (optional)
+		if (event.created_by === req.user.id) {
+			await t.rollback();
+			return res.status(400).json({ status: 'error', message: 'Creator cannot RSVP to their own event' });
+		}
+
+		// Check if already joined
+		let myEvent = await MyEvent.findOne({ where: { user_id: req.user.id, event_id: event.id }, transaction: t, lock: t.LOCK.UPDATE });
+		if (myEvent && myEvent.status === 'joined') {
+			await t.rollback();
+			return res.status(409).json({ status: 'error', message: 'Already joined this event' });
+		}
+
+		if (event.available_slots <= 0) {
+			await t.rollback();
+			return res.status(400).json({ status: 'error', message: 'No available slots' });
+		}
+
+		if (!myEvent) {
+			myEvent = await MyEvent.create({ user_id: req.user.id, event_id: event.id, status: 'joined' }, { transaction: t });
+		} else {
+			myEvent.status = 'joined';
+			await myEvent.save({ transaction: t });
+		}
+
+		event.available_slots = Math.max(0, (event.available_slots || 0) - 1);
+		await event.save({ transaction: t });
+
+		await t.commit();
+
+		// Emit slotsUpdated via Socket.IO if io is available on app
+		const io = req.app.get('io');
+		if (io) {
+			io.emit('slotsUpdated', { eventId: event.id, availableSlots: event.available_slots });
+		}
+
+		return res.status(200).json({ status: 'success', message: 'Joined event successfully', data: { event_id: event.id, available_slots: event.available_slots } });
+	} catch (error) {
+		await t.rollback();
+		console.error('RSVP join error:', error);
+		return res.status(500).json({ status: 'error', message: 'Internal server error', error: error.message });
+	}
+});
+
+// DELETE /api/events/:id/rsvp - cancel join
+router.delete('/:id/rsvp', authenticateToken, async (req, res) => {
+	const t = await sequelize.transaction();
+	try {
+		const eventId = parseInt(req.params.id, 10);
+		if (isNaN(eventId)) {
+			await t.rollback();
+			return res.status(400).json({ status: 'error', message: 'Invalid event id' });
+		}
+		const event = await Event.findByPk(eventId, { transaction: t, lock: t.LOCK.UPDATE });
+		if (!event) {
+			await t.rollback();
+			return res.status(404).json({ status: 'error', message: 'Event not found' });
+		}
+
+		const myEvent = await MyEvent.findOne({ where: { user_id: req.user.id, event_id: event.id }, transaction: t, lock: t.LOCK.UPDATE });
+		if (!myEvent || myEvent.status !== 'joined') {
+			await t.rollback();
+			return res.status(404).json({ status: 'error', message: 'You have not joined this event' });
+		}
+
+		myEvent.status = 'cancelled';
+		await myEvent.save({ transaction: t });
+
+		// Increase available slots but cap at total_slots
+		const currentParticipants = event.total_slots - event.available_slots; // before cancellation
+		event.available_slots = Math.min(event.total_slots, event.available_slots + 1);
+		await event.save({ transaction: t });
+
+		await t.commit();
+
+		const io = req.app.get('io');
+		if (io) {
+			io.emit('slotsUpdated', { eventId: event.id, availableSlots: event.available_slots });
+		}
+
+		return res.status(200).json({ status: 'success', message: 'Cancelled RSVP successfully', data: { event_id: event.id, available_slots: event.available_slots } });
+	} catch (error) {
+		await t.rollback();
+		console.error('RSVP cancel error:', error);
+		return res.status(500).json({ status: 'error', message: 'Internal server error', error: error.message });
 	}
 });
 

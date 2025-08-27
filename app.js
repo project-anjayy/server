@@ -1,5 +1,7 @@
 const express = require('express');
 const cors = require('cors');
+const http = require('http');
+const { Server } = require('socket.io');
 require('dotenv').config();
 
 // Import database
@@ -9,13 +11,23 @@ const db = require('./src/config/database');
 const authRoutes = require('./src/routes/auth');
 
 const app = express();
+const server = http.createServer(app);
+const io = new Server(server, {
+  cors: {
+    origin: '*',
+    methods: ['GET', 'POST', 'PUT', 'DELETE']
+  }
+});
+app.set('io', io);
 
 // Middleware
 app.use(cors());
 app.use(express.json());
+app.use(express.urlencoded({extended:true}))
 
 // Routes
 app.use('/api/auth', authRoutes);
+app.use('/api/events', require('./src/routes/events'));
 
 // Basic route
 app.get('/', (req, res) => {
@@ -56,7 +68,12 @@ app.get('/api/test-db', async (req, res) => {
 
 const PORT = 3001
 
-app.listen(PORT, () => {
+io.on('connection', (socket) => {
+  console.log('🔌 Client connected:', socket.id);
+  socket.on('disconnect', () => console.log('🔌 Client disconnected:', socket.id));
+});
+
+server.listen(PORT, () => {
   console.log(`🚀 Server is running on port ${PORT}`);
   console.log(`🌐 API URL: http://localhost:${PORT}`);
 });
