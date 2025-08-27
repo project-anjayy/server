@@ -28,31 +28,38 @@ function formatEvent(eventInstance) {
 // POST /api/events - create event (auth required)
 router.post('/', authenticateToken, async (req, res) => {
 	try {
-			const { title, description, category, location, time } = req.body;
-			let { total_slots } = req.body;
+	console.log('[CREATE EVENT DEBUG] req.body:', req.body);
+	const { title, description, category, location, time } = req.body;
+	let { total_slots, duration } = req.body;
 
-			if (!title || !category || !location || !time || total_slots == null) {
-			return res.status(400).json({
-				status: 'error',
-				message: 'title, category, location, time, total_slots are required'
-			});
-		}
+	if (!title || !category || !location || !time || total_slots == null) {
+		return res.status(400).json({
+			status: 'error',
+			message: 'title, category, location, time, total_slots are required'
+		});
+	}
 
-			total_slots = parseInt(total_slots, 10);
-			if (isNaN(total_slots) || total_slots < 1) {
-				return res.status(400).json({ status: 'error', message: 'total_slots must be a positive integer' });
-			}
+	total_slots = parseInt(total_slots, 10);
+	if (isNaN(total_slots) || total_slots < 1) {
+		return res.status(400).json({ status: 'error', message: 'total_slots must be a positive integer' });
+	}
 
-			const event = await Event.create({
-				title,
-				description: description || null,
-				category,
-				location,
-				time,
-			total_slots,
-			available_slots: total_slots, // set explicitly to avoid validation race
-				created_by: req.user.id
-			});
+	duration = duration !== undefined ? parseInt(duration, 10) : 90;
+	if (isNaN(duration) || duration < 1) {
+		return res.status(400).json({ status: 'error', message: 'duration must be a positive integer (minutes)' });
+	}
+
+	const event = await Event.create({
+		title,
+		description: description || null,
+		category,
+		location,
+		time,
+		total_slots,
+		available_slots: total_slots, // set explicitly to avoid validation race
+		created_by: req.user.id,
+		duration
+	});
 
 		const created = await Event.findByPk(event.id, { include: [{ model: User, as: 'creator', attributes: ['id', 'name', 'email'] }] });
 
@@ -121,30 +128,53 @@ router.put('/:id', authenticateToken, async (req, res) => {
 			return res.status(403).json({ status: 'error', message: 'Not authorized to update this event' });
 		}
 
-			const updatableFields = ['title', 'description', 'category', 'location', 'time'];
-			updatableFields.forEach(field => {
-				if (Object.prototype.hasOwnProperty.call(req.body, field)) {
-					event[field] = req.body[field];
-				}
-			});
+	const updatableFields = ['title', 'description', 'category', 'location', 'time'];
+	updatableFields.forEach(field => {
+		if (Object.prototype.hasOwnProperty.call(req.body, field)) {
+			event[field] = req.body[field];
+		}
+	});
 
-			if (Object.prototype.hasOwnProperty.call(req.body, 'total_slots')) {
-				const newTotal = parseInt(req.body.total_slots, 10);
-				if (isNaN(newTotal) || newTotal < 1) {
-					return res.status(400).json({ status: 'error', message: 'total_slots must be a positive integer' });
-				}
-				const currentParticipants = event.total_slots - event.available_slots; // number already taken
-				if (newTotal < currentParticipants) {
-					return res.status(400).json({ status: 'error', message: `total_slots cannot be less than current participants (${currentParticipants})` });
-				}
-				// Adjust available slots relative to new total.
-				event.total_slots = newTotal;
-				event.available_slots = newTotal - currentParticipants;
-			}
+	if (Object.prototype.hasOwnProperty.call(req.body, 'duration')) {
+		const newDuration = parseInt(req.body.duration, 10);
+		if (isNaN(newDuration) || newDuration < 1) {
+			return res.status(400).json({ status: 'error', message: 'duration must be a positive integer (minutes)' });
+		}
+		event.duration = newDuration;
+	}
 
-		await event.save();
-		const updated = await Event.findByPk(event.id, { include: [{ model: User, as: 'creator', attributes: ['id', 'name', 'email'] }] });
-		res.json({ status: 'success', message: 'Event updated successfully', data: formatEvent(updated) });
+	if (Object.prototype.hasOwnProperty.call(req.body, 'total_slots')) {
+		const newTotal = parseInt(req.body.total_slots, 10);
+		if (isNaN(newTotal) || newTotal < 1) {
+			return res.status(400).json({ status: 'error', message: 'total_slots must be a positive integer' });
+		}
+		const currentParticipants = event.total_slots - event.available_slots; // number already taken
+		if (newTotal < currentParticipants) {
+			return res.status(400).json({ status: 'error', message: `total_slots cannot be less than current participants (${currentParticipants})` });
+		}
+		// Adjust available slots relative to new total.
+		event.total_slots = newTotal;
+		event.available_slots = newTotal - currentParticipants;
+	}
+
+						await event.save();
+						const updated = await Event.findByPk(event.id, { include: [{ model: User, as: 'creator', attributes: ['id', 'name', 'email'] }] });
+
+						// Emit eventUpdated via Socket.IO (hanya updatedFields)
+						const io = req.app.get('io');
+						if (io) {
+								// Ambil hanya field yang diupdate dari req.body
+								const updatedFields = {};
+								const allowed = ['title', 'description', 'category', 'location', 'time', 'duration', 'total_slots'];
+								allowed.forEach(field => {
+									if (Object.prototype.hasOwnProperty.call(req.body, field)) {
+										updatedFields[field] = req.body[field];
+									}
+								});
+								io.emit('eventUpdated', { eventId: event.id, updatedFields });
+						}
+
+						res.json({ status: 'success', message: 'Event updated successfully', data: formatEvent(updated) });
 	} catch (error) {
 		console.error('Update event error:', error);
 		res.status(500).json({ status: 'error', message: 'Internal server error', error: error.message });
@@ -161,12 +191,32 @@ router.delete('/:id', authenticateToken, async (req, res) => {
 		if (event.created_by !== req.user.id) {
 			return res.status(403).json({ status: 'error', message: 'Not authorized to delete this event' });
 		}
+		const deletedEventId = event.id;
 		await event.destroy();
+
+		// Emit eventDeleted via Socket.IO
+		const io = req.app.get('io');
+		if (io) {
+			io.emit('eventDeleted', { eventId: deletedEventId });
+		}
+
 		res.json({ status: 'success', message: 'Event deleted successfully' });
 	} catch (error) {
 		console.error('Delete event error:', error);
 		res.status(500).json({ status: 'error', message: 'Internal server error', error: error.message });
 	}
+});
+
+// POST /api/events/:id/countdown - trigger countdown update (manual emit)
+router.post('/:id/countdown', authenticateToken, async (req, res) => {
+	const countdownEventId = parseInt(req.params.id, 10);
+	if (isNaN(countdownEventId)) return res.status(400).json({ status: 'error', message: 'Invalid event id' });
+	const { countdown } = req.body;
+	const io = req.app.get('io');
+	if (io) {
+		io.emit('countdownUpdate', { eventId: countdownEventId, countdown });
+	}
+	res.json({ status: 'success', message: 'Countdown update emitted', data: { eventId: countdownEventId, countdown } });
 });
 
 // POST /api/events/:id/rsvp - join event
@@ -228,7 +278,6 @@ router.post('/:id/rsvp', authenticateToken, async (req, res) => {
 	}
 });
 
-// DELETE /api/events/:id/rsvp - cancel join
 router.delete('/:id/rsvp', authenticateToken, async (req, res) => {
 	const t = await sequelize.transaction();
 	try {
@@ -269,6 +318,92 @@ router.delete('/:id/rsvp', authenticateToken, async (req, res) => {
 		await t.rollback();
 		console.error('RSVP cancel error:', error);
 		return res.status(500).json({ status: 'error', message: 'Internal server error', error: error.message });
+	}
+});
+
+// POST /api/events/:id/feedback - beri rating & komentar
+const { Feedback } = require('../config/database');
+router.post('/:id/feedback', authenticateToken, async (req, res) => {
+	try {
+			const eventId = parseInt(req.params.id, 10);
+			if (isNaN(eventId)) return res.status(400).json({ status: 'error', message: 'Invalid event id' });
+			const { rating, comment } = req.body;
+			if (!rating || isNaN(rating) || rating < 1 || rating > 5) {
+				return res.status(400).json({ status: 'error', message: 'Rating (1-5) is required' });
+			}
+			// Cek event ada
+			const event = await Event.findByPk(eventId);
+			if (!event) return res.status(404).json({ status: 'error', message: 'Event not found' });
+			// Cek user sudah join event
+			const myEvent = await MyEvent.findOne({ where: { user_id: req.user.id, event_id: eventId, status: 'joined' } });
+			if (!myEvent) return res.status(403).json({ status: 'error', message: 'You must join the event before giving feedback' });
+
+			// Cek event sudah selesai (UTC-safe, debug info)
+			const now = new Date();
+			const eventStart = new Date(event.time);
+			const eventEnd = new Date(eventStart.getTime() + ((event.duration || 0) * 60000));
+			// Debug log waktu
+			console.log('[FEEDBACK DEBUG]', {
+				now: now.toISOString(),
+				eventStart: eventStart.toISOString(),
+				eventEnd: eventEnd.toISOString(),
+				nowMs: now.getTime(),
+				eventEndMs: eventEnd.getTime(),
+				diffMinutes: (eventEnd.getTime() - now.getTime()) / 60000
+			});
+			if (now < eventEnd) {
+				return res.status(403).json({ status: 'error', message: 'Event has not finished yet. You can only give feedback after the event ends.' });
+			}
+
+			// Cek sudah pernah feedback
+			const existing = await Feedback.findOne({ where: { user_id: req.user.id, event_id: eventId } });
+			if (existing) return res.status(409).json({ status: 'error', message: 'You have already given feedback for this event' });
+			// Simpan feedback
+			const feedback = await Feedback.create({
+				user_id: req.user.id,
+				event_id: eventId,
+				rating,
+				comment: comment || null
+			});
+			res.status(201).json({ status: 'success', message: 'Feedback submitted', data: feedback });
+	} catch (error) {
+		console.error('Feedback error:', error);
+		res.status(500).json({ status: 'error', message: 'Internal server error', error: error.message });
+	}
+});
+
+// GET /api/events/:id/feedback - lihat semua feedback event
+router.get('/:id/feedback', async (req, res) => {
+	try {
+		const eventId = parseInt(req.params.id, 10);
+		if (isNaN(eventId)) return res.status(400).json({ status: 'error', message: 'Invalid event id' });
+		const feedbacks = await Feedback.findAll({
+			where: { event_id: eventId },
+			include: [{ model: User, as: 'user', attributes: ['id', 'name', 'email'] }],
+			order: [['created_at', 'DESC']]
+		});
+		// Agregasi rating
+		let avgRating = null;
+		let totalFeedback = feedbacks.length;
+		if (totalFeedback > 0) {
+			avgRating = feedbacks.reduce((sum, fb) => sum + fb.rating, 0) / totalFeedback;
+			avgRating = Math.round(avgRating * 100) / 100;
+		}
+		res.json({
+			status: 'success',
+			data: feedbacks.map(fb => ({
+				id: fb.id,
+				user: fb.user,
+				rating: fb.rating,
+				comment: fb.comment,
+				created_at: fb.created_at
+			})),
+			average_rating: avgRating,
+			total_feedback: totalFeedback
+		});
+	} catch (error) {
+		console.error('Get feedback error:', error);
+		res.status(500).json({ status: 'error', message: 'Internal server error', error: error.message });
 	}
 });
 
