@@ -43,15 +43,23 @@ module.exports = (sequelize, DataTypes) => {
       allowNull: true
     },
     category: {
-      type: DataTypes.ENUM('soccer', 'basketball', 'running'),
+      type: DataTypes.ENUM(
+        'Soccer', 'Basketball', 'Tennis', 'Volleyball', 'Badminton',
+        'Swimming', 'Running', 'Cycling', 'Boxing', 'Martial Arts',
+        'Gym/Fitness', 'Yoga', 'Dance', 'Other'
+      ),
       allowNull: false,
       validate: {
         notEmpty: {
           msg: 'Category is required'
         },
         isIn: {
-          args: [['soccer', 'basketball', 'running']],
-          msg: 'Category must be soccer, basketball, or running'
+          args: [[
+            'Soccer', 'Basketball', 'Tennis', 'Volleyball', 'Badminton',
+            'Swimming', 'Running', 'Cycling', 'Boxing', 'Martial Arts',
+            'Gym/Fitness', 'Yoga', 'Dance', 'Other'
+          ]],
+          msg: 'Category must be one of the supported sports categories'
         }
       }
     },

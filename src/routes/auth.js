@@ -82,7 +82,7 @@ router.post('/login', async (req, res) => {
     }
 
     // Check password
-    const isPasswordValid = BcryptHelper.comparePassword(password, user.password);
+    const isPasswordValid = await BcryptHelper.comparePassword(password, user.password);
     if (!isPasswordValid) {
       return res.status(401).json({
         status: 'error',
@@ -95,7 +95,7 @@ router.post('/login', async (req, res) => {
       { 
         id: user.id, 
         email: user.email,
-        full_name: user.full_name
+        name: user.name
       },
       process.env.JWT_SECRET || 'your-secret-key',
       { expiresIn: '24h' }
@@ -104,10 +104,10 @@ router.post('/login', async (req, res) => {
     // User response without password
     const userResponse = {
       id: user.id,
-      full_name: user.full_name,
+      name: user.name,
       email: user.email,
-      phone_number: user.phone_number,
-      birth_date: user.birth_date
+      created_at: user.created_at,
+      updated_at: user.updated_at
     };
 
     res.json({
@@ -133,7 +133,7 @@ router.post('/login', async (req, res) => {
 router.get('/profile', authenticateToken, async (req, res) => {
   try {
     const user = await User.findByPk(req.user.id, {
-      attributes: ['id', 'full_name', 'email', 'phone_number', 'birth_date', 'created_at', 'updated_at']
+      attributes: ['id', 'name', 'email', 'created_at', 'updated_at']
     });
 
     if (!user) {
