@@ -1,26 +1,6 @@
-// GET /api/events/:id/rating - get average rating for event
-const { Feedback } = require('../config/database');
-router.get('/:id/rating', async (req, res) => {
-	try {
-		const eventId = parseInt(req.params.id, 10);
-		if (isNaN(eventId)) return res.status(400).json({ status: 'error', message: 'Invalid event id' });
-		const result = await Feedback.findAll({
-			where: { event_id: eventId },
-			attributes: [
-				[require('sequelize').fn('AVG', require('sequelize').col('rating')), 'avg_rating'],
-				[require('sequelize').fn('COUNT', require('sequelize').col('id')), 'count']
-			]
-		});
-		const avg = result[0]?.get('avg_rating');
-		const count = result[0]?.get('count');
-		res.json({ status: 'success', event_id: eventId, avg_rating: avg ? parseFloat(avg).toFixed(2) : null, count: parseInt(count, 10) });
-	} catch (error) {
-		res.status(500).json({ status: 'error', message: 'Internal server error', error: error.message });
-	}
-});
 const express = require('express');
 const { Op } = require('sequelize');
-const { Event, User, MyEvent, sequelize } = require('../config/database');
+const { Event, User, MyEvent, Feedback, sequelize } = require('../config/database');
 const authenticateToken = require('../middleware/auth');
 
 const router = express.Router();
@@ -44,6 +24,26 @@ function formatEvent(eventInstance) {
 		updated_at: e.updated_at
 	};
 }
+
+// GET /api/events/:id/rating - get average rating for event
+router.get('/:id/rating', async (req, res) => {
+	try {
+		const eventId = parseInt(req.params.id, 10);
+		if (isNaN(eventId)) return res.status(400).json({ status: 'error', message: 'Invalid event id' });
+		const result = await Feedback.findAll({
+			where: { event_id: eventId },
+			attributes: [
+				[require('sequelize').fn('AVG', require('sequelize').col('rating')), 'avg_rating'],
+				[require('sequelize').fn('COUNT', require('sequelize').col('id')), 'count']
+			]
+		});
+		const avg = result[0]?.get('avg_rating');
+		const count = result[0]?.get('count');
+		res.json({ status: 'success', event_id: eventId, avg_rating: avg ? parseFloat(avg).toFixed(2) : null, count: parseInt(count, 10) });
+	} catch (error) {
+		res.status(500).json({ status: 'error', message: 'Internal server error', error: error.message });
+	}
+});
 
 // POST /api/events - create event (auth required)
 router.post('/', authenticateToken, async (req, res) => {
@@ -90,6 +90,40 @@ router.post('/', authenticateToken, async (req, res) => {
 		});
 	} catch (error) {
 		console.error('Create event error:', error);
+		res.status(500).json({ status: 'error', message: 'Internal server error', error: error.message });
+	}
+});
+
+// GET /api/events/my-events - get user's joined events
+router.get('/my-events', authenticateToken, async (req, res) => {
+	try {
+		// Get all events that user has joined (status = 'joined')
+		const myEvents = await MyEvent.findAll({
+			where: { 
+				user_id: req.user.id, 
+				status: 'joined' 
+			},
+			include: [{
+				model: Event,
+				as: 'event',
+				include: [{
+					model: User,
+					as: 'creator',
+					attributes: ['id', 'name', 'email']
+				}]
+			}],
+			order: [['event', 'time', 'ASC']]
+		});
+
+		// Format the response to match the expected structure
+		const events = myEvents.map(myEvent => formatEvent(myEvent.event)).filter(Boolean);
+
+		res.json({
+			status: 'success',
+			data: events
+		});
+	} catch (error) {
+		console.error('Get my events error:', error);
 		res.status(500).json({ status: 'error', message: 'Internal server error', error: error.message });
 	}
 });
@@ -246,6 +280,19 @@ router.post('/:id/rsvp', authenticateToken, async (req, res) => {
 			return res.status(404).json({ status: 'error', message: 'Event not found' });
 		}
 
+		// Check if event has finished
+		const now = new Date();
+		const eventStart = new Date(event.time);
+		const eventEnd = new Date(eventStart.getTime() + ((event.duration || 0) * 60000));
+		
+		if (now >= eventEnd) {
+			await t.rollback();
+			return res.status(400).json({ 
+				status: 'error', 
+				message: 'Cannot join an event that has already finished' 
+			});
+		}
+
 		// Prevent creator from joining if desired (optional)
 		if (event.created_by === req.user.id) {
 			await t.rollback();
@@ -264,6 +311,8 @@ router.post('/:id/rsvp', authenticateToken, async (req, res) => {
 			return res.status(400).json({ status: 'error', message: 'No available slots' });
 		}
 
+		console.log(`[RSVP JOIN] User ${req.user.id} joining Event ${event.id}. Before: available_slots=${event.available_slots}`);
+
 		if (!myEvent) {
 			myEvent = await MyEvent.create({ user_id: req.user.id, event_id: event.id, status: 'joined' }, { transaction: t });
 		} else {
@@ -274,11 +323,14 @@ router.post('/:id/rsvp', authenticateToken, async (req, res) => {
 		event.available_slots = Math.max(0, (event.available_slots || 0) - 1);
 		await event.save({ transaction: t });
 
+		console.log(`[RSVP JOIN] User ${req.user.id} joined Event ${event.id}. After: available_slots=${event.available_slots}`);
+
 		await t.commit();
 
 		// Emit slotsUpdated via Socket.IO if io is available on app
 		const io = req.app.get('io');
 		if (io) {
+			console.log(`[RSVP JOIN] Event ${event.id}: Emitting availableSlots = ${event.available_slots}`);
 			io.emit('slotsUpdated', { eventId: event.id, availableSlots: event.available_slots });
 		}
 
@@ -304,24 +356,41 @@ router.delete('/:id/rsvp', authenticateToken, async (req, res) => {
 			return res.status(404).json({ status: 'error', message: 'Event not found' });
 		}
 
+		// Check if event has finished
+		const now = new Date();
+		const eventStart = new Date(event.time);
+		const eventEnd = new Date(eventStart.getTime() + ((event.duration || 0) * 60000));
+		
+		if (now >= eventEnd) {
+			await t.rollback();
+			return res.status(400).json({ 
+				status: 'error', 
+				message: 'Cannot leave an event that has already finished' 
+			});
+		}
+
 		const myEvent = await MyEvent.findOne({ where: { user_id: req.user.id, event_id: event.id }, transaction: t, lock: t.LOCK.UPDATE });
 		if (!myEvent || myEvent.status !== 'joined') {
 			await t.rollback();
 			return res.status(404).json({ status: 'error', message: 'You have not joined this event' });
 		}
 
+		console.log(`[RSVP LEAVE] User ${req.user.id} leaving Event ${event.id}. Before: available_slots=${event.available_slots}`);
+
 		myEvent.status = 'cancelled';
 		await myEvent.save({ transaction: t });
 
-		// Increase available slots but cap at total_slots
-		const currentParticipants = event.total_slots - event.available_slots; // before cancellation
+		// Increase available slots by 1, but cap at total_slots
 		event.available_slots = Math.min(event.total_slots, event.available_slots + 1);
 		await event.save({ transaction: t });
+
+		console.log(`[RSVP LEAVE] User ${req.user.id} left Event ${event.id}. After: available_slots=${event.available_slots}`);
 
 		await t.commit();
 
 		const io = req.app.get('io');
 		if (io) {
+			console.log(`[RSVP LEAVE] Event ${event.id}: Emitting availableSlots = ${event.available_slots}`);
 			io.emit('slotsUpdated', { eventId: event.id, availableSlots: event.available_slots });
 		}
 
@@ -334,7 +403,6 @@ router.delete('/:id/rsvp', authenticateToken, async (req, res) => {
 });
 
 // POST /api/events/:id/feedback - beri rating & komentar
-const { Feedback } = require('../config/database');
 router.post('/:id/feedback', authenticateToken, async (req, res) => {
 	try {
 			const eventId = parseInt(req.params.id, 10);
