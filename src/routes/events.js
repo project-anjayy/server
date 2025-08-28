@@ -16,6 +16,7 @@ function formatEvent(eventInstance) {
 		category: e.category,
 		location: e.location,
 		time: e.time,
+		duration: e.duration,
 		total_slots: e.total_slots,
 		available_slots: e.available_slots,
 		created_by: e.created_by,
@@ -52,6 +53,8 @@ router.post('/', authenticateToken, async (req, res) => {
 	const { title, description, category, location, time } = req.body;
 	let { total_slots, duration } = req.body;
 
+	console.log('[CREATE EVENT DEBUG] Extracted duration:', duration, 'type:', typeof duration);
+
 	if (!title || !category || !location || !time || total_slots == null) {
 		return res.status(400).json({
 			status: 'error',
@@ -64,7 +67,15 @@ router.post('/', authenticateToken, async (req, res) => {
 		return res.status(400).json({ status: 'error', message: 'total_slots must be a positive integer' });
 	}
 
-	duration = duration !== undefined ? parseInt(duration, 10) : 90;
+	// Fix: Don't use fallback to 90 if duration is explicitly provided, even if 0
+	if (duration == null || duration === '') {
+		duration = 90;
+	} else {
+		duration = parseInt(duration, 10);
+	}
+	
+	console.log('[CREATE EVENT DEBUG] Final duration:', duration);
+	
 	if (isNaN(duration) || duration < 1) {
 		return res.status(400).json({ status: 'error', message: 'duration must be a positive integer (minutes)' });
 	}
@@ -80,14 +91,16 @@ router.post('/', authenticateToken, async (req, res) => {
 		created_by: req.user.id,
 		duration
 	});
+	
+	console.log('[CREATE EVENT DEBUG] Created event:', event.toJSON());
 
-		const created = await Event.findByPk(event.id, { include: [{ model: User, as: 'creator', attributes: ['id', 'name', 'email'] }] });
+	const created = await Event.findByPk(event.id, { include: [{ model: User, as: 'creator', attributes: ['id', 'name', 'email'] }] });
 
-		res.status(201).json({
-			status: 'success',
-			message: 'Event created successfully',
-			data: formatEvent(created)
-		});
+	res.status(201).json({
+		status: 'success',
+		message: 'Event created successfully',
+		data: formatEvent(created)
+	});
 	} catch (error) {
 		console.error('Create event error:', error);
 		res.status(500).json({ status: 'error', message: 'Internal server error', error: error.message });
@@ -283,7 +296,7 @@ router.post('/:id/rsvp', authenticateToken, async (req, res) => {
 		// Check if event has finished
 		const now = new Date();
 		const eventStart = new Date(event.time);
-		const eventEnd = new Date(eventStart.getTime() + ((event.duration || 0) * 60000));
+		const eventEnd = new Date(eventStart.getTime() + ((event.duration || 90) * 60000));
 		
 		if (now >= eventEnd) {
 			await t.rollback();
@@ -359,7 +372,7 @@ router.delete('/:id/rsvp', authenticateToken, async (req, res) => {
 		// Check if event has finished
 		const now = new Date();
 		const eventStart = new Date(event.time);
-		const eventEnd = new Date(eventStart.getTime() + ((event.duration || 0) * 60000));
+		const eventEnd = new Date(eventStart.getTime() + ((event.duration || 90) * 60000));
 		
 		if (now >= eventEnd) {
 			await t.rollback();
@@ -421,7 +434,7 @@ router.post('/:id/feedback', authenticateToken, async (req, res) => {
 			// Cek event sudah selesai (UTC-safe, debug info)
 			const now = new Date();
 			const eventStart = new Date(event.time);
-			const eventEnd = new Date(eventStart.getTime() + ((event.duration || 0) * 60000));
+			const eventEnd = new Date(eventStart.getTime() + ((event.duration || 90) * 60000));
 			// Debug log waktu
 			console.log('[FEEDBACK DEBUG]', {
 				now: now.toISOString(),

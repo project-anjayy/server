@@ -5,7 +5,6 @@ module.exports = {
     await queryInterface.addColumn('events', 'duration', {
       type: Sequelize.INTEGER,
       allowNull: false,
-      defaultValue: 90,
       comment: 'Durasi event dalam menit'
     });
   },
