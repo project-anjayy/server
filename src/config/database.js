@@ -2,21 +2,39 @@ const { Sequelize } = require('sequelize');
 require('dotenv').config();
 
 // Create Sequelize instance
-const sequelize = new Sequelize({
-  database: process.env.DB_NAME || 'sports_events_db',
-  username: process.env.DB_USER || 'postgres',
-  password: (process.env.DB_PASSWORD !== undefined ? process.env.DB_PASSWORD : 'postgres'),
-  host: process.env.DB_HOST || 'localhost',
-  port: process.env.DB_PORT || 5432,
-  dialect: 'postgres',
-  logging: process.env.NODE_ENV === 'development' ? console.log : false,
-  pool: {
-    max: 5,
-    min: 0,
-    acquire: 30000,
-    idle: 10000
-  }
-});
+// Support both DATABASE_URL (for Supabase/production) and individual params (for development)
+const sequelize = process.env.DATABASE_URL 
+  ? new Sequelize(process.env.DATABASE_URL, {
+      dialect: 'postgres',
+      logging: process.env.NODE_ENV === 'development' ? console.log : false,
+      dialectOptions: {
+        ssl: process.env.NODE_ENV === 'production' ? {
+          require: true,
+          rejectUnauthorized: false
+        } : false
+      },
+      pool: {
+        max: 5,
+        min: 0,
+        acquire: 30000,
+        idle: 10000
+      }
+    })
+  : new Sequelize({
+      database: process.env.DB_NAME || 'sports_events_db',
+      username: process.env.DB_USER || 'postgres',
+      password: (process.env.DB_PASSWORD !== undefined ? process.env.DB_PASSWORD : 'postgres'),
+      host: process.env.DB_HOST || 'localhost',
+      port: process.env.DB_PORT || 5432,
+      dialect: 'postgres',
+      logging: process.env.NODE_ENV === 'development' ? console.log : false,
+      pool: {
+        max: 5,
+        min: 0,
+        acquire: 30000,
+        idle: 10000
+      }
+    });
 
 // Test database connection
 const testConnection = async () => {

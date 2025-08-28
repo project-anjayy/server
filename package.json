@@ -8,6 +8,14 @@
     "app": "nodemon app.js",
     "dev": "nodemon src/index.js",
     "dev-app": "nodemon app.js",
+    "build": "echo 'No build step required'",
+    "migrate": "sequelize-cli db:migrate --env production",
+    "migrate:dev": "sequelize-cli db:migrate",
+    "migrate:undo": "sequelize-cli db:migrate:undo",
+    "seed": "sequelize-cli db:seed:all --env production",
+    "seed:dev": "sequelize-cli db:seed:all",
+    "db:create": "sequelize-cli db:create",
+    "db:drop": "sequelize-cli db:drop",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [
