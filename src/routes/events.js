@@ -49,11 +49,8 @@ router.get('/:id/rating', async (req, res) => {
 // POST /api/events - create event (auth required)
 router.post('/', authenticateToken, async (req, res) => {
 	try {
-	console.log('[CREATE EVENT DEBUG] req.body:', req.body);
 	const { title, description, category, location, time } = req.body;
 	let { total_slots, duration } = req.body;
-
-	console.log('[CREATE EVENT DEBUG] Extracted duration:', duration, 'type:', typeof duration);
 
 	if (!title || !category || !location || !time || total_slots == null) {
 		return res.status(400).json({
@@ -74,8 +71,6 @@ router.post('/', authenticateToken, async (req, res) => {
 		duration = parseInt(duration, 10);
 	}
 	
-	console.log('[CREATE EVENT DEBUG] Final duration:', duration);
-	
 	if (isNaN(duration) || duration < 1) {
 		return res.status(400).json({ status: 'error', message: 'duration must be a positive integer (minutes)' });
 	}
@@ -92,9 +87,24 @@ router.post('/', authenticateToken, async (req, res) => {
 		duration
 	});
 	
-	console.log('[CREATE EVENT DEBUG] Created event:', event.toJSON());
-
 	const created = await Event.findByPk(event.id, { include: [{ model: User, as: 'creator', attributes: ['id', 'name', 'email'] }] });
+
+	// Emit eventCreated via Socket.IO to notify all clients
+	const io = req.app.get('io');
+	if (io) {
+		io.emit('eventCreated', { event: formatEvent(created) });
+		
+		// Start countdown for the new event if it's scheduled for future
+		const eventTime = new Date(created.time);
+		const now = new Date();
+		if (eventTime > now) {
+			// Get the startEventCountdown function from app.js
+			const app = req.app;
+			if (app.locals.startEventCountdown) {
+				app.locals.startEventCountdown(event.id);
+			}
+		}
+	}
 
 	res.status(201).json({
 		status: 'success',
@@ -102,7 +112,6 @@ router.post('/', authenticateToken, async (req, res) => {
 		data: formatEvent(created)
 	});
 	} catch (error) {
-		console.error('Create event error:', error);
 		res.status(500).json({ status: 'error', message: 'Internal server error', error: error.message });
 	}
 });
@@ -136,7 +145,7 @@ router.get('/my-events', authenticateToken, async (req, res) => {
 			data: events
 		});
 	} catch (error) {
-		console.error('Get my events error:', error);
+		
 		res.status(500).json({ status: 'error', message: 'Internal server error', error: error.message });
 	}
 });
@@ -163,7 +172,7 @@ router.get('/', async (req, res) => {
 			data: events.map(formatEvent)
 		});
 	} catch (error) {
-		console.error('List events error:', error);
+		
 		res.status(500).json({ status: 'error', message: 'Internal server error', error: error.message });
 	}
 });
@@ -179,7 +188,7 @@ router.get('/:id', async (req, res) => {
 		if (!event) return res.status(404).json({ status: 'error', message: 'Event not found' });
 		res.json({ status: 'success', data: formatEvent(event) });
 	} catch (error) {
-		console.error('Get event error:', error);
+		
 		res.status(500).json({ status: 'error', message: 'Internal server error', error: error.message });
 	}
 });
@@ -235,7 +244,7 @@ router.put('/:id', authenticateToken, async (req, res) => {
 
 			res.json({ status: 'success', message: 'Event updated successfully', data: formatEvent(updated) });
 	} catch (error) {
-		console.error('Update event error:', error);
+		
 		res.status(500).json({ status: 'error', message: 'Internal server error', error: error.message });
 	}
 });
@@ -261,7 +270,7 @@ router.delete('/:id', authenticateToken, async (req, res) => {
 
 		res.json({ status: 'success', message: 'Event deleted successfully' });
 	} catch (error) {
-		console.error('Delete event error:', error);
+		
 		res.status(500).json({ status: 'error', message: 'Internal server error', error: error.message });
 	}
 });
@@ -296,7 +305,18 @@ router.post('/:id/rsvp', authenticateToken, async (req, res) => {
 		// Check if event has finished
 		const now = new Date();
 		const eventStart = new Date(event.time);
-		const eventEnd = new Date(eventStart.getTime() + ((event.duration || 90) * 60000));
+		
+		// Use actual duration from database
+		const eventDuration = event.duration;
+		if (!eventDuration || eventDuration <= 0) {
+			await t.rollback();
+			return res.status(400).json({ 
+				status: 'error', 
+				message: 'Event has invalid duration and cannot be joined' 
+			});
+		}
+		
+		const eventEnd = new Date(eventStart.getTime() + (eventDuration * 60000));
 		
 		if (now >= eventEnd) {
 			await t.rollback();
@@ -324,7 +344,7 @@ router.post('/:id/rsvp', authenticateToken, async (req, res) => {
 			return res.status(400).json({ status: 'error', message: 'No available slots' });
 		}
 
-		console.log(`[RSVP JOIN] User ${req.user.id} joining Event ${event.id}. Before: available_slots=${event.available_slots}`);
+		
 
 		if (!myEvent) {
 			myEvent = await MyEvent.create({ user_id: req.user.id, event_id: event.id, status: 'joined' }, { transaction: t });
@@ -336,21 +356,21 @@ router.post('/:id/rsvp', authenticateToken, async (req, res) => {
 		event.available_slots = Math.max(0, (event.available_slots || 0) - 1);
 		await event.save({ transaction: t });
 
-		console.log(`[RSVP JOIN] User ${req.user.id} joined Event ${event.id}. After: available_slots=${event.available_slots}`);
+		
 
 		await t.commit();
 
 		// Emit slotsUpdated via Socket.IO if io is available on app
 		const io = req.app.get('io');
 		if (io) {
-			console.log(`[RSVP JOIN] Event ${event.id}: Emitting availableSlots = ${event.available_slots}`);
+			
 			io.emit('slotsUpdated', { eventId: event.id, availableSlots: event.available_slots });
 		}
 
 		return res.status(200).json({ status: 'success', message: 'Joined event successfully', data: { event_id: event.id, available_slots: event.available_slots } });
 	} catch (error) {
 		await t.rollback();
-		console.error('RSVP join error:', error);
+		
 		return res.status(500).json({ status: 'error', message: 'Internal server error', error: error.message });
 	}
 });
@@ -372,7 +392,18 @@ router.delete('/:id/rsvp', authenticateToken, async (req, res) => {
 		// Check if event has finished
 		const now = new Date();
 		const eventStart = new Date(event.time);
-		const eventEnd = new Date(eventStart.getTime() + ((event.duration || 90) * 60000));
+		
+		// Use actual duration from database
+		const eventDuration = event.duration;
+		if (!eventDuration || eventDuration <= 0) {
+			await t.rollback();
+			return res.status(400).json({ 
+				status: 'error', 
+				message: 'Event has invalid duration' 
+			});
+		}
+		
+		const eventEnd = new Date(eventStart.getTime() + (eventDuration * 60000));
 		
 		if (now >= eventEnd) {
 			await t.rollback();
@@ -388,7 +419,7 @@ router.delete('/:id/rsvp', authenticateToken, async (req, res) => {
 			return res.status(404).json({ status: 'error', message: 'You have not joined this event' });
 		}
 
-		console.log(`[RSVP LEAVE] User ${req.user.id} leaving Event ${event.id}. Before: available_slots=${event.available_slots}`);
+		
 
 		myEvent.status = 'cancelled';
 		await myEvent.save({ transaction: t });
@@ -397,20 +428,20 @@ router.delete('/:id/rsvp', authenticateToken, async (req, res) => {
 		event.available_slots = Math.min(event.total_slots, event.available_slots + 1);
 		await event.save({ transaction: t });
 
-		console.log(`[RSVP LEAVE] User ${req.user.id} left Event ${event.id}. After: available_slots=${event.available_slots}`);
+		
 
 		await t.commit();
 
 		const io = req.app.get('io');
 		if (io) {
-			console.log(`[RSVP LEAVE] Event ${event.id}: Emitting availableSlots = ${event.available_slots}`);
+			
 			io.emit('slotsUpdated', { eventId: event.id, availableSlots: event.available_slots });
 		}
 
 		return res.status(200).json({ status: 'success', message: 'Cancelled RSVP successfully', data: { event_id: event.id, available_slots: event.available_slots } });
 	} catch (error) {
 		await t.rollback();
-		console.error('RSVP cancel error:', error);
+		
 		return res.status(500).json({ status: 'error', message: 'Internal server error', error: error.message });
 	}
 });
@@ -434,12 +465,24 @@ router.post('/:id/feedback', authenticateToken, async (req, res) => {
 			// Cek event sudah selesai (UTC-safe, debug info)
 			const now = new Date();
 			const eventStart = new Date(event.time);
-			const eventEnd = new Date(eventStart.getTime() + ((event.duration || 90) * 60000));
+			
+			// Use actual duration from database
+			const eventDuration = event.duration;
+			if (!eventDuration || eventDuration <= 0) {
+				return res.status(400).json({ 
+					status: 'error', 
+					message: 'Event has invalid duration, cannot process feedback' 
+				});
+			}
+			
+			const eventEnd = new Date(eventStart.getTime() + (eventDuration * 60000));
+			
 			// Debug log waktu
 			console.log('[FEEDBACK DEBUG]', {
 				now: now.toISOString(),
 				eventStart: eventStart.toISOString(),
 				eventEnd: eventEnd.toISOString(),
+				duration: eventDuration,
 				nowMs: now.getTime(),
 				eventEndMs: eventEnd.getTime(),
 				diffMinutes: (eventEnd.getTime() - now.getTime()) / 60000
@@ -460,7 +503,7 @@ router.post('/:id/feedback', authenticateToken, async (req, res) => {
 			});
 			res.status(201).json({ status: 'success', message: 'Feedback submitted', data: feedback });
 	} catch (error) {
-		console.error('Feedback error:', error);
+		
 		res.status(500).json({ status: 'error', message: 'Internal server error', error: error.message });
 	}
 });
@@ -486,7 +529,7 @@ router.get('/:id/feedback', async (req, res) => {
 			}))
 		});
 	} catch (error) {
-		console.error('Get feedback error:', error);
+		
 		res.status(500).json({ status: 'error', message: 'Internal server error', error: error.message });
 	}
 });

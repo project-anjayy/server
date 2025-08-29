@@ -20,8 +20,32 @@ const io = new Server(server, {
 });
 app.set('io', io);
 
+// Make startEventCountdown available to routes
+app.locals.startEventCountdown = null; // Will be set after function definition
+
 // Middleware
-app.use(cors());
+app.use(cors({
+  origin: '*',
+  credentials: false,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'ngrok-skip-browser-warning', 'X-Requested-With'],
+  preflightContinue: false,
+  optionsSuccessStatus: 200
+}));
+
+// Additional CORS middleware for preflight requests
+app.use((req, res, next) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, Content-Length, X-Requested-With, ngrok-skip-browser-warning');
+  
+  if (req.method === 'OPTIONS') {
+    res.sendStatus(200);
+  } else {
+    next();
+  }
+});
+
 app.use(express.json());
 app.use(express.urlencoded({extended:true}))
 
@@ -73,8 +97,114 @@ const PORT = 3001
 // Import DB models for socket handlers
 const dbModels = require('./src/config/database');
 
+// Real-time countdown system
+let countdownIntervals = new Map();
+
+// Function to start countdown for an event
+function startEventCountdown(eventId) {
+  // Clear existing interval if any
+  if (countdownIntervals.has(eventId)) {
+    clearInterval(countdownIntervals.get(eventId));
+  }
+
+    const interval = setInterval(async () => {
+    try {
+      const event = await dbModels.Event.findByPk(eventId);
+      if (!event) {
+        clearInterval(interval);
+        countdownIntervals.delete(eventId);
+        return;
+      }
+
+      const now = new Date();
+      const eventStart = new Date(event.time);
+      
+      // Use actual duration from database
+      const eventDurationMinutes = event.duration;
+      if (!eventDurationMinutes || eventDurationMinutes <= 0) {
+        clearInterval(interval);
+        countdownIntervals.delete(eventId);
+        return;
+      }
+      
+      const eventEnd = new Date(eventStart.getTime() + eventDurationMinutes * 60 * 1000);
+      
+      let countdownData = {
+        eventId: eventId,
+        eventTime: event.time,
+        duration: eventDurationMinutes,
+        status: 'upcoming'
+      };
+
+      if (now < eventStart) {
+        // Event hasn't started yet
+        const timeToStart = eventStart.getTime() - now.getTime();
+        countdownData.status = 'upcoming';
+        countdownData.timeRemaining = timeToStart;
+        countdownData.timeToStart = timeToStart;
+      } else if (now >= eventStart && now < eventEnd) {
+        // Event is ongoing
+        const timeToEnd = eventEnd.getTime() - now.getTime();
+        countdownData.status = 'ongoing';
+        countdownData.timeRemaining = timeToEnd;
+        countdownData.timeToEnd = timeToEnd;
+      } else {
+        // Event has ended
+        countdownData.status = 'completed';
+        countdownData.timeRemaining = 0;
+        // Stop the countdown for this event
+        clearInterval(interval);
+        countdownIntervals.delete(eventId);
+      }
+
+      // Emit countdown update to all clients
+      io.emit('countdownUpdate', countdownData);
+      
+    } catch (error) {
+      // Silent error handling - stop countdown on persistent errors
+      clearInterval(interval);
+      countdownIntervals.delete(eventId);
+    }
+  }, 30000); // Update every 30 seconds instead of 1 second
+
+  countdownIntervals.set(eventId, interval);
+}
+
+// Make startEventCountdown available to routes
+app.locals.startEventCountdown = startEventCountdown;
+
+// Function to start countdowns for all upcoming and ongoing events
+async function initializeCountdowns() {
+  try {
+    const now = new Date();
+    // Get only upcoming and ongoing events to reduce query load
+    const events = await dbModels.Event.findAll({
+      where: {
+        time: {
+          [require('sequelize').Op.gte]: new Date(now.getTime() - 2 * 60 * 60 * 1000) // Events from last 2 hours only
+        }
+      },
+      attributes: ['id', 'time', 'duration', 'title'], // Only select needed fields
+      limit: 50 // Limit to prevent too many concurrent countdowns
+    });
+
+    events.forEach(event => {
+      const eventStart = new Date(event.time);
+      const eventDuration = event.duration || 90;
+      const eventEnd = new Date(eventStart.getTime() + (eventDuration * 60 * 1000));
+      
+      // Start countdown only if event is upcoming or ongoing
+      if (now < eventEnd) {
+        startEventCountdown(event.id);
+      }
+    });
+    
+  } catch (error) {
+    // Silent error handling for initialization
+  }
+}
+
 io.on('connection', (socket) => {
-  console.log('🔌 Client connected:', socket.id);
 
   // joinEvent: RSVP via socket
   socket.on('joinEvent', async ({ eventId, userId }) => {
@@ -134,6 +264,12 @@ io.on('connection', (socket) => {
         }
       });
       await event.save();
+      
+      // If time or duration is updated, restart countdown
+      if (payload.time || payload.duration) {
+        startEventCountdown(event.id);
+      }
+      
       io.emit('eventUpdated', { eventId: event.id, updatedFields: payload });
       socket.emit('updateEventResult', { status: 'success', eventId: event.id });
     } catch (err) {
@@ -141,12 +277,41 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('disconnect', () => console.log('🔌 Client disconnected:', socket.id));
+  // Subscribe to specific event countdown
+  socket.on('subscribeToEvent', ({ eventId }) => {
+    socket.join(`event_${eventId}`);
+  });
+
+  // Unsubscribe from event countdown
+  socket.on('unsubscribeFromEvent', ({ eventId }) => {
+    socket.leave(`event_${eventId}`);
+  });
+
+  socket.on('disconnect', () => {});
+});
+
+// Cleanup function to stop all countdowns
+function cleanupCountdowns() {
+  countdownIntervals.forEach((interval, eventId) => {
+    clearInterval(interval);
+  });
+  countdownIntervals.clear();
+}
+
+// Graceful shutdown
+process.on('SIGTERM', () => {
+  cleanupCountdowns();
+  process.exit(0);
+});
+
+process.on('SIGINT', () => {
+  cleanupCountdowns();
+  process.exit(0);
 });
 
 server.listen(PORT, () => {
-  console.log(`🚀 Server is running on port ${PORT}`);
-  console.log(`🌐 API URL: http://localhost:${PORT}`);
+  // Initialize countdown system
+  setTimeout(initializeCountdowns, 3000); // Wait 3 seconds for database connection
 });
 
 module.exports = app;

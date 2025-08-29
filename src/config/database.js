@@ -14,9 +14,9 @@ const sequelize = process.env.DATABASE_URL
         } : false
       },
       pool: {
-        max: 5,
-        min: 0,
-        acquire: 30000,
+        max: 20,
+        min: 5,
+        acquire: 60000,
         idle: 10000
       }
     })
@@ -29,9 +29,9 @@ const sequelize = process.env.DATABASE_URL
       dialect: 'postgres',
       logging: process.env.NODE_ENV === 'development' ? console.log : false,
       pool: {
-        max: 5,
-        min: 0,
-        acquire: 30000,
+        max: 20,
+        min: 5,
+        acquire: 60000,
         idle: 10000
       }
     });
@@ -40,9 +40,8 @@ const sequelize = process.env.DATABASE_URL
 const testConnection = async () => {
   try {
     await sequelize.authenticate();
-    console.log('✅ Database connection has been established successfully.');
   } catch (error) {
-    console.error('❌ Unable to connect to the database:', error);
+    // Silent connection test
   }
 };
 
