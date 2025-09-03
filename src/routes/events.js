@@ -346,72 +346,43 @@ router.post('/:id/rsvp', authenticateToken, async (req, res) => {
 });
 
 router.delete('/:id/rsvp', authenticateToken, async (req, res) => {
-	const t = await sequelize.transaction();
 	try {
 		const eventId = parseInt(req.params.id, 10);
 		if (isNaN(eventId)) {
-			await t.rollback();
 			return res.status(400).json({ status: 'error', message: 'Invalid event id' });
 		}
-		const event = await Event.findByPk(eventId, { transaction: t, lock: t.LOCK.UPDATE });
+		const event = await Event.findByPk(eventId);
 		if (!event) {
-			await t.rollback();
 			return res.status(404).json({ status: 'error', message: 'Event not found' });
 		}
-
-		// Check if event has finished
 		const now = new Date();
 		const eventStart = new Date(event.time);
-		
-		// Use actual duration from database
 		const eventDuration = event.duration;
 		if (!eventDuration || eventDuration <= 0) {
-			await t.rollback();
-			return res.status(400).json({ 
-				status: 'error', 
-				message: 'Event has invalid duration' 
-			});
+			return res.status(400).json({ status: 'error', message: 'Event has invalid duration' });
 		}
-		
 		const eventEnd = new Date(eventStart.getTime() + (eventDuration * 60000));
-		
 		if (now >= eventEnd) {
-			await t.rollback();
-			return res.status(400).json({ 
-				status: 'error', 
-				message: 'Cannot leave an event that has already finished' 
-			});
+			return res.status(400).json({ status: 'error', message: 'Cannot leave an event that has already finished' });
 		}
-
-		const myEvent = await MyEvent.findOne({ where: { user_id: req.user.id, event_id: event.id }, transaction: t, lock: t.LOCK.UPDATE });
+		const myEvent = await MyEvent.findOne({ where: { user_id: req.user.id, event_id: event.id } });
 		if (!myEvent || myEvent.status !== 'joined') {
-			await t.rollback();
 			return res.status(404).json({ status: 'error', message: 'You have not joined this event' });
 		}
-
-		
-
 		myEvent.status = 'cancelled';
-		await myEvent.save({ transaction: t });
-
-		// Increase available slots by 1, but cap at total_slots
-		event.available_slots = Math.min(event.total_slots, event.available_slots + 1);
-		await event.save({ transaction: t });
-
-		
-
-		await t.commit();
-
+		await myEvent.save();
+		// Atomic update available_slots (max ke total_slots)
+		await Event.update(
+			{ available_slots: sequelize.literal('LEAST(available_slots + 1, total_slots)') },
+			{ where: { id: event.id } }
+		);
+		const updatedEvent = await Event.findByPk(event.id);
 		const io = req.app.get('io');
 		if (io) {
-			
-			io.emit('slotsUpdated', { eventId: event.id, availableSlots: event.available_slots });
+			io.emit('slotsUpdated', { eventId: event.id, availableSlots: updatedEvent.available_slots });
 		}
-
-		return res.status(200).json({ status: 'success', message: 'Cancelled RSVP successfully', data: { event_id: event.id, available_slots: event.available_slots } });
+		return res.status(200).json({ status: 'success', message: 'Cancelled RSVP successfully', data: { event_id: event.id, available_slots: updatedEvent.available_slots } });
 	} catch (error) {
-		await t.rollback();
-		
 		return res.status(500).json({ status: 'error', message: 'Internal server error', error: error.message });
 	}
 });
