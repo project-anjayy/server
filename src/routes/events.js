@@ -289,88 +289,58 @@ router.post('/:id/countdown', authenticateToken, async (req, res) => {
 
 // POST /api/events/:id/rsvp - join event
 router.post('/:id/rsvp', authenticateToken, async (req, res) => {
-	const t = await sequelize.transaction();
 	try {
 		const eventId = parseInt(req.params.id, 10);
 		if (isNaN(eventId)) {
-			await t.rollback();
 			return res.status(400).json({ status: 'error', message: 'Invalid event id' });
 		}
-		const event = await Event.findByPk(eventId, { transaction: t, lock: t.LOCK.UPDATE });
+		// Cek event dan status
+		const event = await Event.findByPk(eventId);
 		if (!event) {
-			await t.rollback();
 			return res.status(404).json({ status: 'error', message: 'Event not found' });
 		}
-
-		// Check if event has finished
 		const now = new Date();
 		const eventStart = new Date(event.time);
-		
-		// Use actual duration from database
 		const eventDuration = event.duration;
 		if (!eventDuration || eventDuration <= 0) {
-			await t.rollback();
-			return res.status(400).json({ 
-				status: 'error', 
-				message: 'Event has invalid duration and cannot be joined' 
-			});
+			return res.status(400).json({ status: 'error', message: 'Event has invalid duration and cannot be joined' });
 		}
-		
 		const eventEnd = new Date(eventStart.getTime() + (eventDuration * 60000));
-		
 		if (now >= eventEnd) {
-			await t.rollback();
-			return res.status(400).json({ 
-				status: 'error', 
-				message: 'Cannot join an event that has already finished' 
-			});
+			return res.status(400).json({ status: 'error', message: 'Cannot join an event that has already finished' });
 		}
-
-		// Prevent creator from joining if desired (optional)
 		if (event.created_by === req.user.id) {
-			await t.rollback();
 			return res.status(400).json({ status: 'error', message: 'Creator cannot RSVP to their own event' });
 		}
-
-		// Check if already joined
-		let myEvent = await MyEvent.findOne({ where: { user_id: req.user.id, event_id: event.id }, transaction: t, lock: t.LOCK.UPDATE });
+		// Cek sudah join
+		let myEvent = await MyEvent.findOne({ where: { user_id: req.user.id, event_id: event.id } });
 		if (myEvent && myEvent.status === 'joined') {
-			await t.rollback();
 			return res.status(409).json({ status: 'error', message: 'Already joined this event' });
 		}
-
-		if (event.available_slots <= 0) {
-			await t.rollback();
+		// Atomic update available_slots
+		const [updatedRows] = await Event.update(
+			{ available_slots: sequelize.literal('GREATEST(available_slots - 1, 0)') },
+			{ where: { id: event.id, available_slots: { [Op.gt]: 0 } } }
+		);
+		if (updatedRows === 0) {
 			return res.status(400).json({ status: 'error', message: 'No available slots' });
 		}
-
-		
-
+		// Buat atau update MyEvent
 		if (!myEvent) {
-			myEvent = await MyEvent.create({ user_id: req.user.id, event_id: event.id, status: 'joined' }, { transaction: t });
+			myEvent = await MyEvent.create({ user_id: req.user.id, event_id: event.id, status: 'joined' });
 		} else {
 			myEvent.status = 'joined';
-			await myEvent.save({ transaction: t });
+			await myEvent.save();
 		}
-
-		event.available_slots = Math.max(0, (event.available_slots || 0) - 1);
-		await event.save({ transaction: t });
-
-		
-
-		await t.commit();
-
-		// Emit slotsUpdated via Socket.IO if io is available on app
+		// Ambil ulang event untuk slot terbaru
+		const updatedEvent = await Event.findByPk(event.id);
+		// Emit slotsUpdated via Socket.IO
 		const io = req.app.get('io');
 		if (io) {
-			
-			io.emit('slotsUpdated', { eventId: event.id, availableSlots: event.available_slots });
+			io.emit('slotsUpdated', { eventId: event.id, availableSlots: updatedEvent.available_slots });
 		}
-
-		return res.status(200).json({ status: 'success', message: 'Joined event successfully', data: { event_id: event.id, available_slots: event.available_slots } });
+		return res.status(200).json({ status: 'success', message: 'Joined event successfully', data: { event_id: event.id, available_slots: updatedEvent.available_slots } });
 	} catch (error) {
-		await t.rollback();
-		
 		return res.status(500).json({ status: 'error', message: 'Internal server error', error: error.message });
 	}
 });
